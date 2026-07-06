@@ -1,3 +1,4 @@
+from torch import unsqueeze
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
@@ -103,6 +104,66 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x))
         return x
 
-block = Block(n_embd=4, num_heads=2, block_size=8)
-out = block(x)
-print(out.shape , out)
+# block = Block(n_embd=4, num_heads=2, block_size=8)
+# out = block(x)
+# print(out.shape , out)
+
+class GPT(nn.Module):
+    def __init__(self , len_vocab , n_embd, num_heads , block_size , n_layer , dropout= 0.1):
+        super().__init__()
+        self.block_size = block_size
+        self.token_embedding_table = nn.Embedding(len_vocab , n_embd)
+        self.postion_embedding_table = nn.Embedding(block_size , n_embd) 
+        self.blocks = nn.Sequential(*[Block(n_embd, num_heads, block_size, dropout) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.lm_head = nn.Linear(n_embd , len_vocab)
+
+
+    def forward(self , indx , target = None):
+        B , T = indx.shape
+        tok_embd = self.token_embedding_table(indx)
+        pos_embd = self.postion_embedding_table(torch.arange(T))
+        x = tok_embd + pos_embd
+        x = self.blocks(x)
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+        
+        if target == None:
+            loss = None
+        else:
+            B , T , C = logits.shape
+            logits = logits.view(B*T ,C )
+            target = target.view(B*T)
+            loss = f.cross_entropy(logits , target)
+        return logits, loss
+
+model = GPT(len_vocab = len_vocab, n_embd=4, num_heads=2, block_size=10, n_layer=2)
+# logits, loss = model(token_tensor)  
+# print(logits.shape)  
+# print(loss)
+
+text = "hello world"
+tokens = encode(text)
+data = torch.tensor(tokens)
+
+input = data[:-1].unsqueeze(0)
+target = data[1:].unsqueeze(0)
+
+print(input ,"\n" , target)
+
+
+# logits, loss = model(input, target)
+# print(logits.shape)
+# print(loss)
+
+Optiomizer = torch.optim.AdamW(model.parameters() , lr= 1e-2)
+for step in range(200):
+    logits, loss = model(input , target)
+    Optiomizer.zero_grad( set_to_none = True)
+    loss.backward()
+    Optiomizer.step()
+    
+    if step % 20 == 0:
+        print(f"step {step}: loss {loss.item():.4f}")
+
+print("final loss:", loss.item())
