@@ -135,10 +135,10 @@ def estimate_loss(model, data, block_size, batch_size, eval_iters=50):
     return losses.mean()
 
 
-block_size = 32
-batch_size = 16
+block_size = 64
+batch_size = 32
 
-model = GPT(len_vocab=len_vocab, n_embd=64, num_heads=4, block_size=block_size, n_layer=4)
+model = GPT(len_vocab=len_vocab, n_embd=256, num_heads=8, block_size=block_size, n_layer=6)
 data = torch.tensor(encode(text))
 
 n = int(0.9 * len(data))
@@ -148,7 +148,7 @@ val_data = data[n:]
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)   # back to 1e-3
 
-for step in range(15000):
+for step in range(5000):
     xb, yb = get_batch(train_data, batch_size, block_size)
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
