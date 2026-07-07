@@ -1,172 +1,136 @@
-# NanoGPT — A From-Scratch GPT Implementation
+# Flatland-GPT: A From-Scratch GPT Implementation
 
-A minimal, pedagogical re-implementation of the GPT architecture in PyTorch.
-Built from first principles, one component at a time, to develop a precise
-intuition for how decoder-only transformers actually work — not to compete
-with Karpathy's `nanoGPT` on throughput or features.
-
-> **Status:** early stage. Only the tokeniser, embeddings, and a single causal
-> self-attention head are implemented so far. The roadmap below describes what
-> exists today and what comes next.
+A GPT-style decoder-only Transformer language model built entirely from scratch in PyTorch (without pre-built transformer libraries). This model is trained on the full text of Edwin Abbott's *Flatland: A Romance of Many Dimensions* (1884, public domain, via Project Gutenberg) using character-level tokenization.
 
 ---
 
-## Motivation
+## Why Flatland (instead of Shakespeare)?
 
-Reading about transformers and implementing them are very different things.
-A surprising amount of the architecture's behavior only becomes clear once
-you've written the masking, the scaled dot-product, the residual connections,
-and the position embeddings by hand and watched the shapes flow through them.
-This project is that exercise: keep the code small enough to hold in your
-head, but complete enough to produce a real, trainable language model.
+To make this project distinct from standard tutorials, I deliberately avoided the standard *tinyshakespeare* dataset. 
+
+*Flatland* is a 19th-century mathematical satire about a two-dimensional being (A Square) discovering the third dimension. This choice is highly fitting for someone with a physics or mathematics background. The text contains unique stylistic elements (such as italics indicated by underscores like `_word_`, stylized Victorian punctuation, and capitalization conventions) which serve as a challenging and interesting pattern-matching test for a character-level model.
 
 ---
 
-## What is implemented today
+## Architecture (Built from First Principles)
 
-Everything currently lives in a single file, [`model.py`](model.py):
+The codebase implements a GPT-2-style decoder architecture using pre-LayerNorm residual connections.
 
-### 1. Character-level tokeniser
+*   **Character-Level Tokenizer:** Builds a vocabulary of ~85 unique tokens (letters, punctuation, numbers, and stylized quotes) directly from the text.
+*   **Embeddings:** Combines token embeddings (`nn.Embedding(len_vocab, n_embd)`) and learned absolute positional embeddings (`nn.Embedding(block_size, n_embd)`).
+*   **Custom Attention Head (`head`):** Implements scaled dot-product self-attention with causal masking. It uses a pre-registered lower-triangular buffer (`tril`) to prevent tokens from attending to future tokens, and incorporates dropout for regularization.
+*   **Multi-Head Attention (`Multiheadattention`):** Runs multiple independent attention heads in parallel, concatenates their outputs, and mixes them using a learned linear projection (`proj`).
+*   **Feedforward Network (`feedforward`):** A standard 2-layer MLP with a ReLU activation and a 4x expansion ratio (`n_embd -> 4 * n_embd -> n_embd`).
+*   **Transformer Block (`Block`):** Implements pre-LayerNorm residual connections:
+    $$\mathbf{x} = \mathbf{x} + \text{Attention}(\text{LayerNorm}(\mathbf{x}))$$
+    $$\mathbf{x} = \mathbf{x} + \text{FeedForward}(\text{LayerNorm}(\mathbf{x}))$$
+*   **Full Model Stack (`GPT`):** Stacks `n_layer` blocks, applies a final LayerNorm, and passes the output through a linear language model head (`lm_head`) to map back to vocabulary logits.
+*   **Autoregressive Generation (`generate()`):** Generates tokens iteratively by cropping the context to `block_size`, calculating logits, applying softmax, and sampling via `torch.multinomial`.
 
-A vocabulary is built from a corpus (`"hello world"` for now), with two
-lookup tables mapping characters ↔ integer token IDs.
+### Architecture Data Flow
 
-```python
-chars      = sorted(list(set(text)))
-num_char   = {i: ch for i, ch in enumerate(chars)}   # id   → char
-char_num   = {ch: i for i, ch in enumerate(chars)}   # char → id
+```mermaid
+graph TD
+    Input[Input Tokens: Batch, Time] --> TokenEmb[Token Embedding Table]
+    Input --> PosEmb[Positional Embedding Table]
+    TokenEmb --> Add[+]
+    PosEmb --> Add
+    Add --> Block1[Block 1]
+    Block1 --> Block2[Block 2]
+    Block2 --> BlockN[Block N]
+    BlockN --> LN[Final LayerNorm]
+    LN --> LMHead[LM Head: Linear]
+    LMHead --> Logits[Logits: Batch, Time, Vocab]
+    Logits --> Gen[Autoregressive Generation / Loss]
+    
+    subgraph Transformer Block
+        In[x] --> LN1[LayerNorm 1]
+        LN1 --> MHA[Multi-Head Attention]
+        MHA --> Add1[+]
+        In --> Add1
+        Add1 --> LN2[LayerNorm 2]
+        LN2 --> FF[FeedForward MLP + ReLU]
+        FF --> Add2[+]
+        Add1 --> Add2
+        Add2 --> Out[x_out]
+    end
 ```
-
-`encode(s)` converts a string to a list of token IDs; `decoding(s)` is the
-inverse. Character-level tokenisation keeps the vocabulary tiny (~10 IDs
-for the demo corpus) so the rest of the pipeline is easy to inspect by eye.
-
-### 2. Token and positional embeddings
-
-Two `nn.Embedding` layers — one for tokens, one for positions — summed to
-form the input representation fed to the attention layer.
-
-```python
-token_embedding      = nn.Embedding(len_vocab, n_embd)   # token   → vector
-positional_embedding = nn.Embedding(block_size, n_embd)  # position → vector
-
-x = token_embedding(token_tensor)          # (B, T, C)
-x = x + positional_embedding(torch.arange(T))  # add per-position info
-```
-
-**Why both?** Token embeddings carry *what* the symbol is; positional
-embeddings carry *where* it is. Self-attention is permutation-equivariant
-by itself — without positional information, reordering the input tokens
-would not change the output beyond the attention weights, which the model
-would have no way to interpret.
-
-### 3. Causal self-attention head
-
-The core building block. For an input `x` of shape `(B, T, C)`, it computes
-queries, keys, and values via three linear projections, scales the
-query–key dot product by `1/sqrt(d_k)`, applies a causal mask using a
-pre-registered lower-triangular buffer, softmaxes, and returns the
-weighted sum of values.
-
-```python
-att = q @ k.transpose(-2, -1) * (1.0 / math.sqrt(k.shape[-1]))
-att = att.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-att = f.softmax(att, dim=-1)
-att = self.dropout(att)
-out = att @ v
-```
-
-**Why scaled?** For large `d_k`, raw dot products grow in magnitude, which
-pushes the softmax into regions with vanishing gradients. Dividing by
-`sqrt(d_k)` keeps the variance of the logits at roughly 1 regardless of
-head size.
-
-**Why causal masking?** In a language model, token `t` must not attend to
-tokens `t+1, t+2, …` from the future. Setting the upper triangle to
-`-inf` before softmax gives those positions probability zero after
-normalisation. The `register_buffer('tril', ...)` call keeps the mask on
-the right device without it being a learnable parameter.
-
-**Why dropout?** Regularisation on the attention weights — discourages
-the model from putting all its mass on a single token and helps
-generalisation during training.
 
 ---
 
-## Running the current code
+## How to Run
 
-Requirements: Python 3.8+ with PyTorch installed.
-
+### Setup
+Ensure PyTorch is installed on your machine:
 ```bash
 pip install torch
+```
+
+Ensure the training file [`flatend.txt`](file:///c:/Users/dhruv/Downloads/GROWN%20WINGS/NanoGpt/flatend.txt) is present in the workspace.
+
+### Training & Generation
+The training pipeline and architecture are entirely contained in [`model.py`](file:///c:/Users/dhruv/Downloads/GROWN%20WINGS/NanoGpt/model.py). Run the script to start training and sample from the model:
+
+```bash
 python model.py
 ```
 
-The script prints the token embeddings, the positional embeddings, their
-cosine similarity (expected to be near zero — the two embedding spaces
-are initialised independently), then runs a single attention head over the
-embedded `"hello"` sequence and prints the output shape and values.
+*Note: The script automatically handles splitting the dataset (90% training, 10% validation), training on the selected hardware device (automatically migrating tensors to GPU if available), and performing autoregressive sampling at the end.*
 
 ---
 
-## Roadmap
+## Phase 1 Results & Analysis
 
-The architecture is being built up one milestone at a time. Each milestone
-keeps the file runnable so the previous behavior can be verified before
-moving on.
+### Configuration
+*   **Vocabulary Size:** ~85 characters
+*   **Embedding Dimension (`n_embd`):** 64
+*   **Attention Heads (`num_heads`):** 4 (individual head size: 16)
+*   **Decoder Blocks (`n_layer`):** 4
+*   **Context Window (`block_size`):** 32 tokens
+*   **Batch Size:** 16
+*   **Steps:** 15,000
+*   **Optimizer:** AdamW (`lr=1e-3`)
+*   **Hardware:** Google Colab T4 GPU
 
-- [x] **Milestone 1 — Tokeniser & embeddings.** Char-level encode/decode,
-      token embeddings, positional embeddings.
-- [x] **Milestone 2 — Single causal self-attention head.** Q/K/V
-      projections, scaled dot-product, causal mask, dropout.
-- [ ] **Milestone 3 — Multi-head attention.** Run `n_head` heads in
-      parallel, concatenate along the channel dim, project back to
-      `n_embd`.
-- [ ] **Milestone 4 — Feed-forward (MLP) block.** Two-layer MLP with a
-      GELU non-linearity — the per-token computation path.
-- [ ] **Milestone 5 — Residual connections & LayerNorm.** Pre-norm
-      transformer block: `x = x + attn(layernorm(x))`, then
-      `x = x + mlp(layernorm(x))`.
-- [ ] **Milestone 6 — Stack into a full GPT model.** Embedding → N ×
-      transformer block → final LayerNorm → LM head (linear back to
-      vocabulary).
-- [ ] **Milestone 7 — Data loading.** Replace the placeholder corpus with
-      a real char-level dataset (tiny-shakespeare is the canonical
-      choice), with batched random chunks sliced from the sequence.
-- [ ] **Milestone 8 — Training loop.** Cross-entropy loss over the
-      shifted targets, AdamW optimiser, periodic loss logging.
-- [ ] **Milestone 9 — Generation / sampling.** Temperature-controlled
-      autoregressive sampling with top-k truncation, fed back through the
-      tokeniser for human-readable output.
+### Loss Trajectory & The Capacity Ceiling
+*   **Initial Loss:** `4.36` (both train and validation)
+*   **Final Loss:** Train Loss: `1.40` | Validation Loss: `~1.59`
+*   **Observations:** The validation loss plateaued in the `1.57 - 1.62` range from roughly step 11,000 onward. Meanwhile, the training loss continued to slowly decrease, widening the train-val gap to `~0.19` by the end of training.
+*   **Diagnosis:** The model reached the **representational capacity ceiling** of a 64-dimensional, 4-layer architecture. Further training steps alone would not yield better generalization on this dataset. To break through this limit, the model architecture needs to be scaled up (higher `n_embd`, more layers, more heads).
 
----
+### Sample Generation at Step 15,000
+Using the seed `"T"`, the model generated the following 300 characters:
 
-## Project structure
+> "Tediral of their me, but all be at knowleed." seed not I were to be diffull. _voiese of hope easy fascent help castomens or would even rhibible. Seection is of them the furility orpation of Stranges in all then some then you for tope infelsion. West Circle, and besided Sight the Clour Caperations of
 
-```
-NanoGpt/
-├── model.py      # tokeniser, embeddings, and attention head (current)
-└── README.md
-```
-
-Expected to grow as the roadmap progresses — likely into `model.py`
-(full architecture), `data.py` (loading), `train.py` (training loop),
-and `generate.py` (inference).
+**Qualitative Observations:**
+1.  **Word-level Coherence:** The model correctly forms common English words ("of", "their", "but", "all", "were", "would", "even", "and") and creates phonetically believable "invented" words ("knowleed", "castomens", "rhibible").
+2.  **Syntax & Formatting:** The model has successfully learned sentence mechanics, including capitalizations, periods, spaces, and quotation marks.
+3.  **Style Learning:** It correctly adopted the dataset's underscore italics notation (`_voiese_` style), showing that it captured raw formatting characteristics of the Project Gutenberg source file.
+4.  **Limits:** Grammatical coherence over long distances is weak, and spelling errors are prevalent on rarer words. This is standard behavior at a validation loss of ~1.59; full coherence typically requires a loss in the `1.0 - 1.3` range.
 
 ---
 
-## References
+## Development Journey & Build Log
 
-- Vaswani et al., *Attention Is All You Need* (2017) — the original
-  transformer paper; source of the scaled dot-product attention formula.
-- Karpathy, *nanoGPT* — the canonical minimal GPT implementation; this
-  project is a slower, more verbose companion to it.
-- Karpathy, *Let's build GPT: from scratch, in code, spelled out* — the
-  video walkthrough that motivates the milestone ordering above.
+1.  **Component Isolation:** Tested each component (`head` → `Multiheadattention` → `feedforward` → `Block` → `GPT`) on a toy 11-character string (`"hello world"`) before running on real data. This ensured the tensor shapes, forward passes, and training loops were fully verified in isolation.
+2.  **Debugging Initial Quirks:** Solved class-scoping issues (methods accidentally defined outside classes), typos in variable names, stale references, and ensured `get_batch()` was properly wired into the optimizer steps.
+3.  **CPU Baseline:** Conducted the first full-scale training run on CPU using a small configuration (`n_embd=64, n_layer=4, num_heads=4`, `block_size=32`) to check stability.
+4.  **Learning Rate & Evaluation Stability:**
+    *   Initially tried a learning rate of `1e-2`, which caused the training loss to bounce erratically and plateau around `1.7 - 2.0`.
+    *   Fixed this by lowering the learning rate to `1e-3`.
+    *   Implemented `estimate_loss()` to average losses over 50 iterations, replacing noisy single-batch loss printouts with a smooth, reliable signal for validation tracking.
+5.  **Scaling with GPU:** Migrated training to a Google Colab T4 GPU, extending the run to 15,000 steps and revealing the representational ceiling of the Phase 1 configuration.
 
 ---
 
-## License
+## Phase 2 Roadmap
 
-Personal learning project. No license granted for redistribution at this
-time.
+With the training pipeline validated and running on GPU, Phase 2 will focus on scaling model capacity and modernizing the architecture:
+
+*   **Scale Up Parameters:** Increase the size of `n_embd`, `n_layer`, and `num_heads` to push past the current representational capacity ceiling.
+*   **Modernize the Architecture:** Shift from GPT-2-era components to contemporary Llama-era conventions on the same codebase:
+    *   Swap learned absolute positional embeddings for **Rotary Position Embeddings (RoPE)**.
+    *   Swap LayerNorm (`nn.LayerNorm`) for **RMSNorm** to improve throughput.
+    *   Swap ReLU in the feedforward network for **SwiGLU** activation functions.
+*   **Downstream Explorations:** Keep this codebase strictly focused on pre-training, but explore retrieval-augmented generation (RAG) or light instruction tuning as separate follow-on projects.

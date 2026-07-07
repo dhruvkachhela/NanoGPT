@@ -123,6 +123,17 @@ def get_batch(data , batch_size , block_size):
     y = torch.stack([data[i+1 : i+1+block_size] for i in ix])
     return x , y
 
+@torch.no_grad()
+def estimate_loss(model, data, block_size, batch_size, eval_iters=50):
+    model.eval()
+    losses = torch.zeros(eval_iters)
+    for k in range(eval_iters):
+        xb, yb = get_batch(data, batch_size, block_size)
+        _, loss = model(xb, yb)
+        losses[k] = loss.item()
+    model.train()
+    return losses.mean()
+
 
 block_size = 32
 batch_size = 16
@@ -134,22 +145,21 @@ n = int(0.9 * len(data))
 
 train_data = data[:n]
 val_data = data[n:]
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)   # back to 1e-3
 
-for step in range(5000):
+for step in range(15000):
     xb, yb = get_batch(train_data, batch_size, block_size)
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
-    if step % 200 == 0:
-        print(f"step {step}: loss {loss.item():.4f}")
-
-print("final loss:", loss.item())
-
+    if step % 500 == 0:
+        train_loss = estimate_loss(model, train_data, block_size, batch_size)
+        val_loss = estimate_loss(model, val_data, block_size, batch_size)
+        print(f"step {step}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
 context = torch.tensor(encode("T")).unsqueeze(0)
-out = model.generate(context, max_new_token=200)
+out = model.generate(context, max_new_token=300)
 print(decode(out[0].tolist()))
