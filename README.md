@@ -150,6 +150,37 @@ clues now and, haring shall not from m
 
 ---
 
+## Phase 3 Results & Analysis (Architecture Upgrade)
+
+To modernize the network architecture, several GPT-2 era components were upgraded to Llama-style conventions while retaining the same base hyperparameters as Phase 2.
+
+### Configuration
+*   **Base Config (Same as Phase 2):** `n_embd=256`, `num_heads=8`, `n_layer=6`, `block_size=64`, `dropout=0.2`
+*   **Training Details:** 5,000 steps, batch size 32, AdamW (`lr=1e-3`)
+*   **Architectural Upgrades:**
+    *   **Rotary Position Embeddings (RoPE):** Replaced learned absolute positional embeddings, applied to the Query (Q) and Key (K) projection vectors in attention.
+    *   **RMSNorm:** Replaced LayerNorm (`nn.LayerNorm`) throughout the model.
+    *   **SwiGLU Activation:** Replaced the standard ReLU feedforward network with a gated SiLU feedforward network (SwiGLU).
+
+### Loss Trajectory & Comparison
+
+While we ran Phase 3 for the same 5,000 steps, the modern architecture reached its generalization peak much faster, followed by rapid overfitting.
+
+| Metric | Phase 2 (Base GPT-2) | Phase 3 (Llama-style Upgrades) |
+|---|---|---|
+| **Best Val Loss** | 1.5061 | 1.5256 |
+| **Best Step** | 2500 | 1000 |
+| **Overfitting Onset** | ~Step 3000 | ~Step 1500 |
+
+### Key Finding: Data-Limited vs. Architecture-Limited Regime
+Phase 3 did not improve the loss ceiling — the best validation loss was marginally worse than Phase 2.
+
+The primary driver is the transition to a SwiGLU feedforward network. A SwiGLU block utilizes three weight matrices instead of the traditional feedforward network's two (all operating at $4 \times$ the hidden dimension), significantly increasing the model's parameter count and representation capacity. On this small, fixed ~185k-character dataset (*Flatland*), this extra capacity caused faster and more severe overfitting, offsetting any potential training or efficiency benefits from RoPE and RMSNorm.
+
+Ultimately, performance in this regime is **data-limited, not architecture-limited**. Modern architecture components do not yield performance improvements (and can actively degrade generalization) when the bottleneck is dataset size rather than model expressiveness. This confirms the hypothesis formed after Phase 2, where scaling already showed diminishing returns in the same `1.50`–`1.51` validation loss range across separate runs.
+
+---
+
 ## Development Journey & Build Log
 
 1.  **Component Isolation:** Tested each component (`head` → `Multiheadattention` → `feedforward` → `Block` → `GPT`) on a toy 11-character string (`"hello world"`) before running on real data. This ensured the tensor shapes, forward passes, and training loops were fully verified in isolation.
@@ -164,16 +195,10 @@ clues now and, haring shall not from m
 
 ---
 
-## Phase 3 Roadmap
+## Future Work & Next Steps
 
-Now that representational capacity is resolved, Phase 3 will focus on regularization, training optimization, and further architecture modernization:
+Based on the findings from Phase 3, future iterations should focus on breaking dataset bottlenecks and isolating component effects:
 
-*   **Combat Overfitting:**
-    *   Implement weight decay (e.g., `weight_decay=0.1`) in the AdamW optimizer configuration (default is `0.0`).
-    *   Experiment with higher dropout rates (e.g., `0.3` or `0.4`) or custom learning rate decay schedules.
-    *   Explore minor architectural downscaling (e.g., `n_embd=128`, `n_layer=5`) to balance capacity and dataset size.
-*   **Modernize the Architecture:** Shift from GPT-2-era components to contemporary Llama-style conventions on the same codebase:
-    *   Swap learned absolute positional embeddings for **Rotary Position Embeddings (RoPE)**.
-    *   Swap LayerNorm (`nn.LayerNorm`) for **RMSNorm** to improve throughput.
-    *   Swap ReLU in the feedforward network for **SwiGLU** activation functions.
-*   **Downstream Explorations:** Keep this codebase strictly focused on pre-training, but explore retrieval-augmented generation (RAG) or light instruction tuning as separate follow-on projects.
+*   **Dataset Expansion:** Test the model on a larger and more varied text corpus to bypass the current data-limitation and determine if the SwiGLU architecture can generalize given sufficient volume.
+*   **Subword Tokenization:** Transition from character-level tokenization to a subword tokenizer (e.g., Byte Pair Encoding) to help the model learn richer semantic structures.
+*   **Component Isolation (Ablation):** Perform ablation studies isolating the Rotary Position Embeddings (RoPE) and RMSNorm upgrades from SwiGLU to see which specific components actually helped versus hurt performance.
