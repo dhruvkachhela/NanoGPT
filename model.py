@@ -29,7 +29,7 @@ def precompute_rope_freqs (head_size , block_size , device , base = 10000):
   freqns = torch.outer(t , freqns)
   sin = torch.sin(freqns)
   cos = torch.cos(freqns)
-  return sin , cos
+  return cos , sin
 
 def apply_rope(x, cos, sin):
     B, T, hs = x.shape
